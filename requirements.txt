@@ -1,5 +1,5 @@
-torch>=2.8.0
-torchvision>=0.23.0
+torch==2.5.1
+torchvision==0.20.1
 segmentation-models-pytorch==0.5.0
 albumentations>=2.0.8
 opencv-python-headless>=4.10.0
