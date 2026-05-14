@@ -390,7 +390,8 @@ def get_2d_plan(plan: Dict[str, Any],
                 bg_color: int = 255,
                 ax: Optional[plt.Axes] = None,
                 show: bool = True,
-                title: Optional[str] = None) -> np.ndarray:
+                title: Optional[str] = None,
+                diff: bool=True) -> np.ndarray:
     """
     Render a grayscale 2D plan showing walls, windows, doors and front_door.
     Walls are drawn dark (black by default); doors / windows / front_door are
@@ -416,7 +417,10 @@ def get_2d_plan(plan: Dict[str, Any],
         if geom is None:
             continue
         mask = geometry_to_mask(geom, shape=shape, line_thickness=line_thickness)
-        img[mask > 0] = opening_color
+        if diff:
+            img[mask > 0] = opening_color
+        else:
+            img[mask > 0] = wall_color
 
     img = np.flipud(img)
     if show:
