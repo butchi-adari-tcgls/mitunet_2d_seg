@@ -10,3 +10,6 @@ numpy>=2.0.2
 tqdm>=4.67.1
 pycocotools>=2.0.10
 geopandas
+uvicorn[standard]
+fastapi
+python-multipart

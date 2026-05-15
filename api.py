@@ -12,7 +12,7 @@ from graph_maker import GraphMaker
 
 WEIGHTS_PATH = os.environ.get(
     "MITUNET_WEIGHTS",
-    "/opt/dlami/nvme/mitunet_weights/mitunet.pth",
+    "mitunet.pth",
 )
 
 # Module-level handle; populated in the lifespan hook so the model
@@ -71,12 +71,14 @@ def health():
 async def build_graph_endpoint(
     file: UploadFile = File(..., description="Floor-plan image"),
     border: int = Form(3),
-    kernel_size: int = Form(15),
-    iterations: int = Form(2),
-    min_room_area: int = Form(500),
-    max_room_area: Optional[int] = Form(None),
-    gap_thresh: float = Form(5.0),
-    min_close_points: int = Form(20),
+    kernel_size: int = Form(50),
+    iterations: int = Form(1),
+    min_room_area: int = Form(10),
+    max_room_area: Optional[int] = Form(100000),
+    gap_thresh: float = Form(10.0),
+    min_overlap: int = Form(5),
+    angle_thresh: float = Form(0.95),
+    show: bool = Form(False)
 ):
     """
     Accepts an image upload and returns a JSON graph:
@@ -109,7 +111,9 @@ async def build_graph_endpoint(
             min_room_area=min_room_area,
             max_room_area=max_room_area,
             gap_thresh=gap_thresh,
-            min_close_points=min_close_points,
+            min_overlap=min_overlap,
+            angle_thresh=angle_thresh,
+            show=show
         )
     except Exception as e:
         # surface model/processing errors cleanly

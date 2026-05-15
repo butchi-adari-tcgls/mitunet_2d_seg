@@ -37,7 +37,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 
-DEFAULT_WEIGHTS = "/opt/dlami/nvme/mitunet_weights/mitunet.pth"
+DEFAULT_WEIGHTS = "mitunet.pth"
 
 def segment_direction(p1: np.ndarray, p2: np.ndarray) -> np.ndarray | None:
     """Unit vector from p1 -> p2, or None if the segment has zero length."""
