@@ -287,7 +287,10 @@ class GraphMaker:
         return inverted
 
     def connected_components(
-        self, inverted: np.ndarray, show: bool = False
+        self, inverted: np.ndarray, 
+        image,
+        mask,
+        show: bool = False
     ):
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             inverted, connectivity=4
@@ -299,9 +302,20 @@ class GraphMaker:
             cc_vis = colors[labels]  # fancy-indexing -> HxWx3
             self._new_fig(
                 f"Step 5 — Connected components ({num_labels - 1} blobs)",
-                figsize=(6, 6),
+                figsize=(18, 6),
             )
-            plt.imshow(cc_vis); plt.axis("off")
+            # plt.subplot(1, 2, 1)
+            # plt.imshow(cc_vis); plt.axis("off");
+            # plt.subplot(1, 2, 2)
+            # plt.imshow(inverted, cmap="gray"); plt.title("Inverted"); plt.axis("off")
+            # plt.tight_layout()
+            # plt.imshow(cc_vis); plt.axis("off")
+            plt.subplot(1, 3, 1)
+            plt.imshow(cc_vis); plt.axis("off");
+            plt.subplot(1, 3, 2)
+            plt.imshow(mask, cmap="gray"); plt.title("mask"); plt.axis("off")
+            plt.subplot(1, 3, 3)
+            plt.imshow(image); plt.title("image"); plt.axis("off")
             plt.tight_layout()
 
         return num_labels, labels, stats, centroids
@@ -578,7 +592,7 @@ class GraphMaker:
             bordered, kernel_size=kernel_size, iterations=iterations, show=show
         )
         inverted = self.invert(closed, show=show)
-        n, labels, stats, cents = self.connected_components(inverted, show=show)
+        n, labels, stats, cents = self.connected_components(inverted, image_bgr, mask, show=show)
         rooms    = self.filter_rooms(
             n, labels, stats, cents,
             border=border,
