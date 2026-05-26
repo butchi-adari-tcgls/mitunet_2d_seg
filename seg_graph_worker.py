@@ -48,9 +48,6 @@ def predict(img_path, mask_path=None, show=False):
 
     result_mask = mask.squeeze().cpu().numpy()
 
-    # ---------------------------------
-    # Load GT mask if provided
-    # ---------------------------------
     gt_mask = None
 
     if mask_path is not None:
@@ -59,9 +56,6 @@ def predict(img_path, mask_path=None, show=False):
         # wall only
         gt_mask = (gt_mask == 1).astype(np.uint8)
 
-    # ---------------------------------
-    # Plot
-    # ---------------------------------
     if show:
 
         cols = 3 if gt_mask is not None else 2
@@ -91,7 +85,55 @@ def predict(img_path, mask_path=None, show=False):
 
     return result_mask
 
-def find_room_boundaries(img_path, pred_wall, border=3, kernel_size=15, iterations=2, min_room_area = 500, max_room_area = 50000):
+def segment_direction(p1, p2):
+    v = p2 - p1
+    n = np.linalg.norm(v)
+    if n == 0:
+        return None
+    return v / n
+
+
+def projection_overlap(a1, a2, b1, b2, axis):
+    a_proj = sorted([np.dot(a1, axis), np.dot(a2, axis)])
+    b_proj = sorted([np.dot(b1, axis), np.dot(b2, axis)])
+
+    overlap = min(a_proj[1], b_proj[1]) - max(a_proj[0], b_proj[0])
+    return max(0, overlap)
+
+
+def point_to_line_distance(p, a, b):
+    ab = b - a
+    if np.linalg.norm(ab) == 0:
+        return np.linalg.norm(p - a)
+
+    return abs(np.cross(ab, p - a)) / np.linalg.norm(ab)
+
+
+def segments_match(a1, a2, b1, b2, gap_thresh=20, min_overlap=10, angle_thresh=0.95):
+    dir_a = segment_direction(a1, a2)
+    dir_b = segment_direction(b1, b2)
+
+    if dir_a is None or dir_b is None:
+        return False
+
+    # almost parallel
+    if abs(np.dot(dir_a, dir_b)) < angle_thresh:
+        return False
+
+    # distance of B line from A line
+    d1 = point_to_line_distance(b1, a1, a2)
+    d2 = point_to_line_distance(b2, a1, a2)
+    dist = (d1 + d2) / 2
+
+    if dist > gap_thresh:
+        return False
+
+    # overlap along A line direction
+    overlap = projection_overlap(a1, a2, b1, b2, dir_a)
+
+    return overlap >= min_overlap
+
+def find_room_boundaries(img_path, pred_wall, border=1, kernel_size=15, iterations=2, min_room_area = 500, max_room_area = 50000):
     # Make a clean binary wall image from your straight_img
     wall_img = (pred_wall > 0).astype(np.uint8) * 255
 
@@ -106,31 +148,37 @@ def find_room_boundaries(img_path, pred_wall, border=3, kernel_size=15, iteratio
     # Invert -> rooms become white blobs, walls become black barriers
     inverted = cv2.bitwise_not(closed)
 
-    # H_pad, W_pad = inverted.shape
-    # seeds = [(border, border),
-    #         (W_pad - 1 - border, border),
-    #         (border, H_pad - 1 - border),
-    #         (W_pad - 1 - border, H_pad - 1 - border)]
-
-    # for sx, sy in seeds:
-    #     if inverted[sy, sx] == 255:   # this pixel is part of the outside region
-    #         cv2.floodFill(inverted, None, (sx, sy), 0)
-
     # Find connected components (each blob = one room candidate)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         inverted, connectivity=4
     )
 
     # Filter out the "outside" region and noise
-    H, W = inverted.shape
-    total_area = H * W
+    H_pad, W_pad = inverted.shape
+    total_area = H_pad * W_pad
     if max_room_area is None:
-        max_room_area = total_area * 0.5    
+        max_room_area = total_area * 0.5
+
+    # Any component label that appears in the edge band of the padded image is "outside"
+    edge_band = border + 2
+    edge_labels = set()
+    edge_labels.update(labels[:edge_band, :].flatten())
+    edge_labels.update(labels[-edge_band:, :].flatten())
+    edge_labels.update(labels[:, :edge_band].flatten())
+    edge_labels.update(labels[:, -edge_band:].flatten())
+    edge_labels.discard(0)   # background
 
     print(f"Total components found (excl. background): {num_labels - 1}")
     for i in range(1, num_labels):
         x, y, w, h, area = stats[i]
-        keep = "KEEP" if min_room_area <= area <= max_room_area else "skip"
+
+        if not (min_room_area <= area <= max_room_area):
+            keep = "skip (area)"
+        elif i in edge_labels:
+            keep = "skip (outside)"
+        else:
+            keep = "KEEP"
+
         print(f"  [{keep}] comp {i}: area={area:>7}, bbox=({x},{y},{w},{h})")
 
     rooms = []
@@ -141,23 +189,46 @@ def find_room_boundaries(img_path, pred_wall, border=3, kernel_size=15, iteratio
         if area < min_room_area or area > max_room_area:
             continue
 
+        if i in edge_labels:
+            continue
+
         # Get the room's outline as a polygon
         mask = (labels == i).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contour = contours[0] if contours else None
+        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        # contour = contours[0] if contours else None
 
-        epsilon = 0.02 * cv2.arcLength(contour, True)
-        contour = cv2.approxPolyDP(contour, epsilon, True)
+        # epsilon = 0.01 * cv2.arcLength(contour, True)
+        # contour = cv2.approxPolyDP(contour, epsilon, True)
+
+        # rooms.append({
+        #     'id':       len(rooms) + 1,
+        #     'label':    i,
+        #     'label_mask': (labels == i).astype(np.uint8),
+        #     'bbox':     (int(x), int(y), int(w), int(h)),
+        #     'polygon':  contour.squeeze().tolist() if contour is not None else None,
+        #     'centroid': (int(cx), int(cy)),
+        #     'area':     int(area),
+        #     'contour':  contour,
+        # })
+
+        dense_contour = contours[0] if contours else None
+
+        polygon_contour = None
+        if dense_contour is not None:
+            epsilon = 0.01 * cv2.arcLength(dense_contour, True)
+            polygon_contour = cv2.approxPolyDP(dense_contour, epsilon, True)
 
         rooms.append({
             'id':       len(rooms) + 1,
             'label':    i,
-            'bbox':     (int(x), int(y), int(w), int(h)),   # x, y, width, height
-            'polygon': contour.squeeze().tolist() if contour is not None else None,
+            'bbox':     (int(x), int(y), int(w), int(h)),
+            'polygon':  polygon_contour.squeeze().tolist() if polygon_contour is not None else None,
             'centroid': (int(cx), int(cy)),
             'area':     int(area),
-            'contour':  contour,
+            'contour':  dense_contour,
         })
+
 
     print(f"Detected {len(rooms)} rooms")
     for r in rooms:
@@ -226,42 +297,90 @@ def build_graph_from_mask(rooms):
         graph["nodes"][nid] = room['polygon']
 
     # edges
+    # for i in range(len(rooms)):
+    #     for j in range(i + 1, len(rooms)):
+    #         room_a = rooms[i]
+    #         room_b = rooms[j]
+
+    #         # # Check if they share a wall (i.e., their contours are close)
+    #         # contour_a = room_a['contour']
+    #         # contour_b = room_b['contour']
+
+    #         # # TODO: does both contours points are close to each other with threshold atleast 2-3 points? not with centroid
+    #         # if contour_a is not None and contour_b is not None:
+
+    #         #     pts_a = contour_a.reshape(-1, 2)
+    #         #     pts_b = contour_b.reshape(-1, 2)
+
+    #         #     close_pts = 0
+    #         #     dist_thresh = 20
+    #         #     min_shared_points = 1
+
+    #         #     for pt in pts_a:
+    #         #         # signed distance to contour_b
+    #         #         dist = abs(cv2.pointPolygonTest(
+    #         #             contour_b,
+    #         #             (float(pt[0]), float(pt[1])),
+    #         #             True
+    #         #         ))
+
+    #         #         if dist <= dist_thresh:
+    #         #             close_pts += 1
+
+    #         #         if close_pts >= min_shared_points:
+    #         #             graph["edges"].append((room_a['id'], room_b['id']))
+    #         #             break
+
+    #         # Edge detection using bbox side-overlap, not sparse contour corners
+    #         xa, ya, wa, ha = room_a['bbox']
+    #         xb, yb, wb, hb = room_b['bbox']
+
+    #         ax1, ay1, ax2, ay2 = xa, ya, xa + wa, ya + ha
+    #         bx1, by1, bx2, by2 = xb, yb, xb + wb, yb + hb
+
+    #         gap_thresh = 50       # wall thickness / max gap between rooms
+    #         min_overlap = 20      # minimum shared side length
+
+    #         # vertical adjacency: A left/right of B
+    #         x_gap = min(abs(ax2 - bx1), abs(bx2 - ax1))
+    #         y_overlap = max(0, min(ay2, by2) - max(ay1, by1))
+
+    #         # horizontal adjacency: A above/below B
+    #         y_gap = min(abs(ay2 - by1), abs(by2 - ay1))
+    #         x_overlap = max(0, min(ax2, bx2) - max(ax1, bx1))
+
+    #         if (x_gap <= gap_thresh and y_overlap >= min_overlap) or \
+    #         (y_gap <= gap_thresh and x_overlap >= min_overlap):
+    #             graph["edges"].append((room_a['id'], room_b['id']))
+
+    # edges
     for i in range(len(rooms)):
         for j in range(i + 1, len(rooms)):
             room_a = rooms[i]
             room_b = rooms[j]
 
-            # Check if they share a wall (i.e., their contours are close)
-            contour_a = room_a['contour']
-            contour_b = room_b['contour']
+            # pts_a = room_a['contour'].reshape(-1, 2)
+            # pts_b = room_b['contour'].reshape(-1, 2)
+            pts_a = np.array(room_a['polygon'], dtype=float)
+            pts_b = np.array(room_b['polygon'], dtype=float)
 
-            # TODO: does both contours points are close to each other with threshold atleast 2-3 points? not with centroid
-            if contour_a is not None and contour_b is not None:
+            for k in range(len(pts_a)):
+                a1 = pts_a[k].astype(float)
+                a2 = pts_a[(k + 1) % len(pts_a)].astype(float)
 
-                pts_a = contour_a.reshape(-1, 2)
-                pts_b = contour_b.reshape(-1, 2)
+                for l in range(len(pts_b)):
+                    b1 = pts_b[l].astype(float)
+                    b2 = pts_b[(l + 1) % len(pts_b)].astype(float)
 
-                close_pts = 0
-                dist_thresh = 20
-                min_shared_points = 1
-
-                for pt in pts_a:
-                    # signed distance to contour_b
-                    dist = abs(cv2.pointPolygonTest(
-                        contour_b,
-                        (float(pt[0]), float(pt[1])),
-                        True
-                    ))
-
-                    if dist <= dist_thresh:
-                        close_pts += 1
-
-                    if close_pts >= min_shared_points:
+                    if segments_match(a1, a2, b1, b2):
                         graph["edges"].append((room_a['id'], room_b['id']))
                         break
+                else:
+                    continue
+                break
 
     # print the graph
-    print("Graph:")
+    print("<<< Graph >>>")
     print("Nodes:")
     for nid, coord in graph["nodes"].items():
         print(f"  {nid}: {coord}")
