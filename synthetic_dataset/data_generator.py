@@ -444,6 +444,17 @@ NUM_SAMPLES  = 10000
 BASE_DIR     = "plans"
 SCALE        = 15
 WALL_T       = 7
+BW_WALL_COLORS = [
+    (0, 0, 0),        # black
+    (60, 60, 60),     # dark gray
+    (120, 120, 120),  # gray
+    (180, 180, 180),  # light gray
+
+    (180, 40, 40),    # red
+    (40, 90, 180),    # blue
+    (40, 150, 80),    # green
+    (180, 120, 40),   # orange/brown
+]
 PAD          = 50
 CORR_W_FT    = 7
 LIFT_H_FT    = 5
@@ -464,23 +475,6 @@ APARTMENT_TYPES = [
     "CLUSTER_4xMIXED",
 ]
 
-# LABELS = {
-#     0:  ("background",     (200, 200, 200)),
-#     1:  ("bedroom",        (255, 165,  80)),
-#     2:  ("bathroom",       ( 70, 130, 220)),
-#     3:  ("kitchen",        (100, 200, 100)),
-#     4:  ("wall",           ( 40,  40,  40)),
-#     5:  ("door",           (160,  82,  45)),
-#     6:  ("window",         (135, 206, 250)),
-#     7:  ("front_door",     (255,  50,  50)),
-#     8:  ("balcony",        (144, 238, 144)),
-#     9:  ("living_space",   (255, 245, 130)),
-#     10: ("lift",           (190,   0, 220)),
-#     11: ("corridor",       (210, 180, 140)),
-#     12: ("apartment",      (220, 170, 255)),
-#     13: ("master_bedroom", (255, 140,   0)),
-# }
-
 LABELS = {
     0:  ("background",   (200, 200, 200)),
     1:  ("living",       (255, 245, 130)),
@@ -496,7 +490,6 @@ LABELS = {
     11: ("corridor",     (210, 180, 140)),
     12: ("stair",        (235, 235, 235)),
 }
-
 
 LID = {n: i for i, (n, _) in LABELS.items()}
 LCOL = {i: c for i, (_, c) in LABELS.items()}
@@ -530,6 +523,161 @@ def _transform_layout(rooms, W, H, allow_vflip=True):
     if allow_vflip and random.random() < 0.35:
         rooms = _mirror_rooms_tb(rooms, H)
     return rooms, W, H
+
+def _fit_rect(room, pad=8):
+    x1 = room["x"] + pad
+    y1 = room["y"] + pad
+    x2 = room["x"] + room["w"] - pad
+    y2 = room["y"] + room["h"] - pad
+    if x2 <= x1: x2 = x1 + 2
+    if y2 <= y1: y2 = y1 + 2
+    return x1, y1, x2, y2
+
+
+def draw_outer_border(draw, img_w, img_h, margin=14, color=(180,180,180), width=2):
+    draw.rectangle(
+        [margin, margin, img_w - margin, img_h - margin],
+        outline=color,
+        width=width
+    )
+
+
+def draw_bed(draw, room, color=(90,90,90)):
+    x1, y1, x2, y2 = _fit_rect(room, pad=10)
+    w, h = x2 - x1, y2 - y1
+    if w < 30 or h < 30:
+        return
+
+    # bed frame
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+
+    # pillow side
+    if w >= h:   # horizontal bed
+        py2 = y1 + max(10, h // 4)
+        draw.rectangle([x1, y1, x2, py2], outline=color, width=2)
+        mid = (x1 + x2) // 2
+        draw.line([mid, y1, mid, py2], fill=color, width=1)
+    else:        # vertical bed
+        px2 = x1 + max(10, w // 4)
+        draw.rectangle([x1, y1, px2, y2], outline=color, width=2)
+        mid = (y1 + y2) // 2
+        draw.line([x1, mid, px2, mid], fill=color, width=1)
+
+
+def draw_sofa(draw, room, color=(90,90,90)):
+    x1, y1, x2, y2 = _fit_rect(room, pad=12)
+    w, h = x2 - x1, y2 - y1
+    if w < 28 or h < 20:
+        return
+
+    if w >= h:
+        seat_h = max(8, h // 2)
+        back_h = max(5, h // 5)
+        arm_w = max(6, w // 8)
+
+        # back
+        draw.rectangle([x1, y1, x2, y1 + back_h], outline=color, width=2)
+        # seat
+        draw.rectangle([x1 + arm_w, y1 + back_h, x2 - arm_w, y1 + back_h + seat_h], outline=color, width=2)
+        # arms
+        draw.rectangle([x1, y1 + back_h, x1 + arm_w, y1 + back_h + seat_h], outline=color, width=2)
+        draw.rectangle([x2 - arm_w, y1 + back_h, x2, y1 + back_h + seat_h], outline=color, width=2)
+    else:
+        seat_w = max(8, w // 2)
+        back_w = max(5, w // 5)
+        arm_h = max(6, h // 8)
+
+        draw.rectangle([x1, y1, x1 + back_w, y2], outline=color, width=2)
+        draw.rectangle([x1 + back_w, y1 + arm_h, x1 + back_w + seat_w, y2 - arm_h], outline=color, width=2)
+        draw.rectangle([x1 + back_w, y1, x1 + back_w + seat_w, y1 + arm_h], outline=color, width=2)
+        draw.rectangle([x1 + back_w, y2 - arm_h, x1 + back_w + seat_w, y2], outline=color, width=2)
+
+
+def draw_table(draw, room, color=(100,100,100), kind="dining"):
+    x1, y1, x2, y2 = _fit_rect(room, pad=12)
+    w, h = x2 - x1, y2 - y1
+    if w < 24 or h < 24:
+        return
+
+    if kind == "center":
+        # center table
+        cx1 = x1 + w // 4
+        cy1 = y1 + h // 4
+        cx2 = x2 - w // 4
+        cy2 = y2 - h // 4
+        draw.ellipse([cx1, cy1, cx2, cy2], outline=color, width=2)
+    else:
+        # dining table
+        tx1 = x1 + w // 5
+        ty1 = y1 + h // 4
+        tx2 = x2 - w // 5
+        ty2 = y2 - h // 4
+        draw.rectangle([tx1, ty1, tx2, ty2], outline=color, width=2)
+
+        chair_w = max(5, (tx2 - tx1) // 6)
+        chair_h = max(5, (ty2 - ty1) // 4)
+
+        # top chairs
+        draw.rectangle([tx1, ty1 - chair_h - 2, tx1 + chair_w, ty1 - 2], outline=color, width=1)
+        draw.rectangle([tx2 - chair_w, ty1 - chair_h - 2, tx2, ty1 - 2], outline=color, width=1)
+
+        # bottom chairs
+        draw.rectangle([tx1, ty2 + 2, tx1 + chair_w, ty2 + chair_h + 2], outline=color, width=1)
+        draw.rectangle([tx2 - chair_w, ty2 + 2, tx2, ty2 + chair_h + 2], outline=color, width=1)
+
+        # side chairs
+        draw.rectangle([tx1 - chair_h - 2, ty1, tx1 - 2, ty1 + chair_w], outline=color, width=1)
+        draw.rectangle([tx1 - chair_h - 2, ty2 - chair_w, tx1 - 2, ty2], outline=color, width=1)
+        draw.rectangle([tx2 + 2, ty1, tx2 + chair_h + 2, ty1 + chair_w], outline=color, width=1)
+        draw.rectangle([tx2 + 2, ty2 - chair_w, tx2 + chair_h + 2, ty2], outline=color, width=1)
+
+
+def draw_kitchen_counter(draw, room, color=(100,100,100)):
+    x1, y1, x2, y2 = _fit_rect(room, pad=8)
+    w, h = x2 - x1, y2 - y1
+    if w < 28 or h < 28:
+        return
+
+    t = max(6, min(12, min(w, h) // 6))
+
+    # L-shaped counter
+    draw.rectangle([x1, y1, x2, y1 + t], outline=color, width=2)
+    draw.rectangle([x1, y1, x1 + t, y2], outline=color, width=2)
+
+    # stove blocks
+    sx = x1 + t + 6
+    sy = y1 + 3
+    burner = max(4, t // 3)
+    for i in range(3):
+        bx1 = sx + i * (burner + 4)
+        by1 = sy
+        draw.rectangle([bx1, by1, bx1 + burner, by1 + burner], outline=color, width=1)
+
+    # sink
+    sink_w = max(10, w // 5)
+    sink_h = max(8, t - 4)
+    draw.rectangle([x2 - sink_w - 4, y1 + 2, x2 - 4, y1 + 2 + sink_h], outline=color, width=1)
+
+
+def draw_wc_fixture(draw, room, color=(90,90,90)):
+    x1, y1, x2, y2 = _fit_rect(room, pad=10)
+    w, h = x2 - x1, y2 - y1
+    if w < 18 or h < 24:
+        return
+
+    cx = (x1 + x2) // 2
+
+    # cistern
+    tank_h = max(6, h // 5)
+    draw.rectangle([cx - w // 5, y1, cx + w // 5, y1 + tank_h], outline=color, width=2)
+
+    # bowl
+    bowl_y1 = y1 + tank_h + 3
+    bowl_y2 = y2
+    draw.ellipse([cx - w // 4, bowl_y1, cx + w // 4, bowl_y2], outline=color, width=2)
+
+    # seat split
+    draw.line([cx, bowl_y1 + 2, cx, bowl_y2 - 2], fill=color, width=1)
 
 def _make_flat_side(n_bed, n_bath, bhs=None):
     lw, rw, lh = _lw(), _rw(), _lh()
@@ -1381,16 +1529,20 @@ def blit(fd, md, lbl, rect, col, lid):
     H,W = lbl.shape
     lbl[max(0,y1):min(H,y2), max(0,x1):min(W,x2)] = lid
 
-def blit_bw(bd, rect, wall):
+# def blit_bw(bd, rect, wall):
+#     x1,y1,x2,y2 = (int(v) for v in rect)
+#     bd.rectangle([x1,y1,x2,y2], fill=(0,0,0) if wall else (255,255,255))
+
+def blit_bw(bd, rect, wall, wall_color=(0,0,0)):
     x1,y1,x2,y2 = (int(v) for v in rect)
-    bd.rectangle([x1,y1,x2,y2], fill=(0,0,0) if wall else (255,255,255))
+    bd.rectangle([x1,y1,x2,y2], fill=wall_color if wall else (255,255,255))
 
 def _clip_rect(lbl, rect):
     x1,y1,x2,y2 = (int(v) for v in rect)
     H,W = lbl.shape
     return max(0,x1), max(0,y1), min(W,x2), min(H,y2)
 
-def draw_wall_outline(fd, bd, md, lbl, rect, col, lid, wall_mode="filled_black"):
+def draw_wall_outline(fd, bd, md, lbl, rect, col, lid, bw_wall_color, wall_mode="filled_black"):
     x1,y1,x2,y2 = (int(v) for v in rect)
     if x2 <= x1 or y2 <= y1:
         return
@@ -1401,7 +1553,8 @@ def draw_wall_outline(fd, bd, md, lbl, rect, col, lid, wall_mode="filled_black")
     else:
         fill_col = (120,120,120) if wall_mode == "filled_gray" else col
         fd.rectangle([x1,y1,x2,y2], fill=fill_col)
-        bd.rectangle([x1,y1,x2,y2], fill=(0,0,0))
+        # bd.rectangle([x1,y1,x2,y2], fill=(0,0,0))
+        bd.rectangle([x1,y1,x2,y2], fill=bw_wall_color)
         md.rectangle([x1,y1,x2,y2], fill=col)
     H,W = lbl.shape
     yy1,yy2 = max(0,y1), min(H,y2)
@@ -1936,6 +2089,12 @@ def render_plan(apt_type):
     bw_with_text = random.random() < 0.5
     bw_with_dimensions = random.random() < 0.5
 
+    bw_wall_color = random.choice(BW_WALL_COLORS)
+
+    bw_add_outer_border = random.random() < 0.35
+    bw_add_furniture    = random.random() < 0.55
+    bw_thick_wall_extra = random.choice([0, 0, 0, 2, 3, 4])
+
     is_cluster     = apt_type.startswith("CLUSTER_")
     flat_bounds_ft = None; corr_x_ft = None
 
@@ -1981,7 +2140,9 @@ def render_plan(apt_type):
 
     for r in rooms:
         rc = [r["x"],r["y"],r["x"]+r["w"],r["y"]+r["h"]]
-        blit(fd,md,lbl,rc,LCOL[r["label"]],r["label"]); blit_bw(bd,rc,False)
+        blit(fd,md,lbl,rc,LCOL[r["label"]],r["label"])
+        # blit_bw(bd,rc,False)
+        blit_bw(bd, rc, False, bw_wall_color)
 
     for r in rooms:
         if r["name"] == "stair":
@@ -2033,7 +2194,18 @@ def render_plan(apt_type):
             if key in drawn_walls:
                 continue
             drawn_walls.add(key)
-            draw_wall_outline(fd, bd, md, lbl, rc, wc, wl, wall_mode=wall_mode)
+            # draw_wall_outline(fd, bd, md, lbl, rc, wc, wl, bw_wall_color, wall_mode=wall_mode)
+            draw_wall_outline(fd, bd, md, lbl, rc, wc, wl, bw_wall_color, wall_mode=wall_mode)
+
+            # Extra wall thickness only for _bw image
+            if bw_thick_wall_extra > 0:
+                x1, y1, x2, y2 = [int(v) for v in rc]
+                e = bw_thick_wall_extra
+
+                if side_name in ("top", "bottom"):
+                    bd.rectangle([x1, y1 - e, x2, y2 + e], fill=bw_wall_color)
+                else:
+                    bd.rectangle([x1 - e, y1, x2 + e, y2], fill=bw_wall_color)
 
     dc,dl   = LCOL[LID["door"]],LID["door"]
     fdc,fdl = LCOL[LID["front_door"]],LID["front_door"]
@@ -2551,6 +2723,60 @@ def render_plan(apt_type):
                 if rect is not None and _window_is_clear(rect):
                     draw_window_gap(fd, bd, md, lbl, rect, wic, wil)
                     _record_edge(r, "outside", "window", rect)
+
+    # Random _bw-only style variation
+    if bw_add_outer_border:
+        draw_outer_border(
+            bd,
+            pw,
+            ph,
+            margin=random.choice([12, 16, 20, 24]),
+            color=random.choice([(120,120,120), (160,160,160), (190,190,190)]),
+            width=random.choice([1, 2])
+        )
+
+    if bw_add_furniture:
+        for r in rooms:
+            rn = r["name"]
+
+            if rn in ("bedroom", "master_bedroom"):
+                if random.random() < 0.70:
+                    draw_bed(
+                        bd,
+                        r,
+                        color=random.choice([(70,70,70), (100,100,100), (130,130,130)])
+                    )
+
+            elif rn == "living_space":
+                if random.random() < 0.55:
+                    draw_sofa(
+                        bd,
+                        r,
+                        color=random.choice([(70,70,70), (100,100,100), (130,130,130)])
+                    )
+                if random.random() < 0.45:
+                    draw_table(
+                        bd,
+                        r,
+                        color=random.choice([(80,80,80), (110,110,110), (140,140,140)]),
+                        kind=random.choice(["center", "dining"])
+                    )
+
+            elif rn == "kitchen":
+                if random.random() < 0.70:
+                    draw_kitchen_counter(
+                        bd,
+                        r,
+                        color=random.choice([(70,70,70), (100,100,100), (130,130,130)])
+                    )
+
+            elif rn == "bathroom":
+                if random.random() < 0.60:
+                    draw_wc_fixture(
+                        bd,
+                        r,
+                        color=random.choice([(70,70,70), (100,100,100), (130,130,130)])
+                    )
 
     if bw_with_dimensions:
         draw_room_dimensions(bd, rooms, color=(170,170,170))
