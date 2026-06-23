@@ -1,0 +1,10 @@
+venv/
+
+__pycache__/
+*.png
+*.csv
+test_images/
+checkpoints/
+*.pkl
+outputs/
+plans/

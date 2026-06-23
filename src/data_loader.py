@@ -25,6 +25,7 @@ CLASS_ORDER = [
     "wall",
     "front_door",
     "balcony",
+    "stairs"
 ]
 
 

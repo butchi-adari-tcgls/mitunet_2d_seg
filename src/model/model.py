@@ -42,29 +42,60 @@ def build_mitunet(
     return model
 
 
-def replace_output_head(model: torch.nn.Module, classes: int = 1, activation: str | None = None) -> torch.nn.Module:
-    """Replace the final segmentation head of the model.
+# def replace_output_head(model: torch.nn.Module, classes: int = 1, activation: str | None = None) -> torch.nn.Module:
+#     """Replace the final segmentation head of the model.
 
-    This is useful when you want to update the number of output channels/classes.
-    """
+#     This is useful when you want to update the number of output channels/classes.
+#     """
+#     if not hasattr(model, "segmentation_head"):
+#         raise AttributeError("Model does not have a segmentation_head attribute")
+
+#     in_channels = model.segmentation_head[0].in_channels if isinstance(model.segmentation_head, nn.Sequential) else model.segmentation_head.in_channels
+
+#     activation_layer = nn.Identity()
+#     if activation == "sigmoid":
+#         activation_layer = nn.Sigmoid()
+#     elif activation == "softmax":
+#         activation_layer = nn.Softmax(dim=1)
+
+#     model.segmentation_head = nn.Sequential(
+#         nn.Conv2d(in_channels, classes, kernel_size=1),
+#         activation_layer,
+#     )
+
+#     return model
+
+
+def replace_output_head(
+    model: torch.nn.Module,
+    classes: int = 1,
+    activation: str | None = None,
+    dropout: float = 0.0,
+) -> torch.nn.Module:
+
     if not hasattr(model, "segmentation_head"):
         raise AttributeError("Model does not have a segmentation_head attribute")
 
-    in_channels = model.segmentation_head[0].in_channels if isinstance(model.segmentation_head, nn.Sequential) else model.segmentation_head.in_channels
+    if isinstance(model.segmentation_head, nn.Sequential):
+        in_channels = model.segmentation_head[0].in_channels
+    else:
+        in_channels = model.segmentation_head.in_channels
 
-    activation_layer = nn.Identity()
+    layers = []
+
+    if dropout > 0:
+        layers.append(nn.Dropout2d(p=dropout))
+
+    layers.append(nn.Conv2d(in_channels, classes, kernel_size=1))
+
     if activation == "sigmoid":
-        activation_layer = nn.Sigmoid()
+        layers.append(nn.Sigmoid())
     elif activation == "softmax":
-        activation_layer = nn.Softmax(dim=1)
+        layers.append(nn.Softmax(dim=1))
 
-    model.segmentation_head = nn.Sequential(
-        nn.Conv2d(in_channels, classes, kernel_size=1),
-        activation_layer,
-    )
+    model.segmentation_head = nn.Sequential(*layers)
 
     return model
-
 
 if __name__ == "__main__":
     model = build_mitunet(classes=1, checkpoint_path=None)

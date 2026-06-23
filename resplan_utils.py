@@ -35,7 +35,7 @@ from shapely import affinity
 # -----------------------------
 
 CATEGORY_COLORS: Dict[str, str] = {
-    "living": "#d9d9d9",    # light gray
+    "living": "#d9d9d9",     # light gray
     "bedroom": "#66c2a5",    # greenish
     "bathroom": "#fc8d62",   # orange
     "kitchen": "#8da0cb",    # blue
@@ -382,6 +382,59 @@ def plot_plan_and_graph(plan: Dict[str, Any],
     plt.tight_layout()
     return ax
 
+# def get_2d_plan(plan: Dict[str, Any],
+#                 shape: Tuple[int, int] = DEFAULT_CANVAS_SIZE,
+#                 line_thickness: int = 0,
+#                 wall_color: int = 0,
+#                 opening_color: int = 140,
+#                 bg_color: int = 255,
+#                 ax: Optional[plt.Axes] = None,
+#                 show: bool = True,
+#                 title: Optional[str] = None,
+#                 diff: bool=True) -> np.ndarray:
+#     """
+#     Render a grayscale 2D plan showing walls, windows, doors and front_door.
+#     Walls are drawn dark (black by default); doors / windows / front_door are
+#     drawn in a lighter gray on top so each element is clearly identifiable
+#     in a monochrome image.
+
+#     Returns:
+#         np.ndarray of shape (H, W), dtype uint8.
+#     """
+#     plan = normalize_keys(plan)
+#     h, w = shape
+#     img = np.full((h, w), bg_color, dtype=np.uint8)
+
+#     # 1) Walls first (dark)
+#     wall_geom = plan.get("wall")
+#     if wall_geom is not None:
+#         mask = geometry_to_mask(wall_geom, shape=shape, line_thickness=line_thickness)
+#         img[mask > 0] = wall_color
+
+#     # 2) Openings on top (gray) so they appear as breaks in the wall
+#     for key in ["door", "window", "front_door"]:
+#         geom = plan.get(key)
+#         if geom is None:
+#             continue
+#         mask = geometry_to_mask(geom, shape=shape, line_thickness=line_thickness)
+#         if diff:
+#             img[mask > 0] = opening_color
+#         else:
+#             img[mask > 0] = wall_color
+
+#     img = np.flipud(img)
+#     if show:
+#         if ax is None:
+#             _, ax = plt.subplots(figsize=(6, 6))
+#         ax.imshow(img, cmap="gray", vmin=0, vmax=255)
+#         ax.set_axis_off()
+#         if title:
+#             ax.set_title(title)
+#         plt.tight_layout()
+
+#     return img
+
+
 def get_2d_plan(plan: Dict[str, Any],
                 shape: Tuple[int, int] = DEFAULT_CANVAS_SIZE,
                 line_thickness: int = 0,
@@ -391,38 +444,44 @@ def get_2d_plan(plan: Dict[str, Any],
                 ax: Optional[plt.Axes] = None,
                 show: bool = True,
                 title: Optional[str] = None,
-                diff: bool=True) -> np.ndarray:
-    """
-    Render a grayscale 2D plan showing walls, windows, doors and front_door.
-    Walls are drawn dark (black by default); doors / windows / front_door are
-    drawn in a lighter gray on top so each element is clearly identifiable
-    in a monochrome image.
+                diff: bool=True,
+                draw_door_swing: bool = True) -> np.ndarray:
 
-    Returns:
-        np.ndarray of shape (H, W), dtype uint8.
-    """
     plan = normalize_keys(plan)
     h, w = shape
     img = np.full((h, w), bg_color, dtype=np.uint8)
 
-    # 1) Walls first (dark)
+    # 1) Walls first
     wall_geom = plan.get("wall")
     if wall_geom is not None:
         mask = geometry_to_mask(wall_geom, shape=shape, line_thickness=line_thickness)
         img[mask > 0] = wall_color
 
-    # 2) Openings on top (gray) so they appear as breaks in the wall
-    for key in ["door", "window", "front_door"]:
+    # 2) Draw windows and front door normally
+    for key in ["window", "front_door"]:
         geom = plan.get(key)
         if geom is None:
             continue
         mask = geometry_to_mask(geom, shape=shape, line_thickness=line_thickness)
-        if diff:
-            img[mask > 0] = opening_color
+        img[mask > 0] = opening_color if diff else wall_color
+
+    # 3) Draw doors
+    door_geom = plan.get("door")
+    if door_geom is not None:
+        if draw_door_swing:
+            img = draw_door_swing_on_image(
+                img,
+                door_geom,
+                shape=shape,
+                color=opening_color if diff else wall_color,
+                thickness=1,
+            )
         else:
-            img[mask > 0] = wall_color
+            mask = geometry_to_mask(door_geom, shape=shape, line_thickness=line_thickness)
+            img[mask > 0] = opening_color if diff else wall_color
 
     img = np.flipud(img)
+
     if show:
         if ax is None:
             _, ax = plt.subplots(figsize=(6, 6))
@@ -433,3 +492,125 @@ def get_2d_plan(plan: Dict[str, Any],
         plt.tight_layout()
 
     return img
+
+
+def _door_opening_line_from_geom(door):
+    """
+    Returns door opening line endpoints from LineString or Polygon.
+    For Polygon door rectangles, uses the long axis centerline.
+    """
+    if isinstance(door, LineString):
+        coords = list(door.coords)
+        if len(coords) >= 2:
+            return coords[0], coords[-1]
+
+    if isinstance(door, Polygon):
+        rect = door.minimum_rotated_rectangle
+        coords = np.array(rect.exterior.coords[:-1], dtype=float)
+
+        # find main direction from longest rectangle edge
+        best_len = -1
+        best_vec = None
+
+        for i in range(4):
+            p1 = coords[i]
+            p2 = coords[(i + 1) % 4]
+            vec = p2 - p1
+            length = np.linalg.norm(vec)
+
+            if length > best_len:
+                best_len = length
+                best_vec = vec
+
+        if best_vec is None or best_len <= 0:
+            return None, None
+
+        u = best_vec / best_len
+
+        # project all rectangle points onto long axis
+        projections = coords @ u
+        min_proj = projections.min()
+        max_proj = projections.max()
+
+        center = coords.mean(axis=0)
+
+        p1 = center + u * (min_proj - center @ u)
+        p2 = center + u * (max_proj - center @ u)
+
+        return tuple(p1), tuple(p2)
+
+    return None, None
+
+def draw_door_swing_on_image(
+    img: np.ndarray,
+    door_geom: Any,
+    shape: Tuple[int, int] = DEFAULT_CANVAS_SIZE,
+    color: int = 140,
+    thickness: int = 2,
+) -> np.ndarray:
+
+    h, w = shape
+
+    for door in get_geometries(door_geom):
+        p1, p2 = _door_opening_line_from_geom(door)
+
+        if p1 is None or p2 is None:
+            continue
+
+        x1, y1 = p1
+        x2, y2 = p2
+
+        dx = x2 - x1
+        dy = y2 - y1
+        radius = int(round(math.hypot(dx, dy)))
+
+        if radius <= 2:
+            continue
+
+        # unit vector along door opening
+        ux = dx / radius
+        uy = dy / radius
+
+        # choose hinge as first endpoint
+        hinge = (int(round(x1)), int(round(y1)))
+
+        # perpendicular direction for opened door leaf
+        # change sign here if swing side is wrong
+        px = -uy
+        py = ux
+
+        open_end = (
+            int(round(x1 + px * radius)),
+            int(round(y1 + py * radius)),
+        )
+
+        closed_end = (
+            int(round(x2)),
+            int(round(y2)),
+        )
+
+        # draw opened door leaf
+        cv2.line(img, hinge, open_end, color=color, thickness=thickness)
+
+        # angle from hinge to closed end
+        start_angle = math.degrees(math.atan2(dy, dx))
+
+        # angle from hinge to open end
+        end_angle = math.degrees(math.atan2(py, px))
+
+        cv2.ellipse(
+            img,
+            hinge,
+            (radius, radius),
+            0,
+            int(round(start_angle)),
+            int(round(end_angle)),
+            color,
+            thickness,
+        )
+
+    return img
+
+
+
+
