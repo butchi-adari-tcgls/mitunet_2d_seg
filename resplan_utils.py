@@ -434,6 +434,227 @@ def plot_plan_and_graph(plan: Dict[str, Any],
 
 #     return img
 
+def _oriented_opening(geom, default_thickness: float = 6.0):
+    """
+    Return (p1, p2, length, thickness) for a door/window geometry.
+    p1, p2 = endpoints of the opening CENTERLINE (long axis).
+    thickness = short-axis width of the rect (≈ wall thickness).
+    """
+    if isinstance(geom, LineString):
+        coords = np.array(geom.coords, dtype=float)
+        p1, p2 = coords[0], coords[-1]
+        length = float(np.linalg.norm(p2 - p1))
+        return p1, p2, length, float(default_thickness)
+
+    if isinstance(geom, (Polygon, MultiPolygon)):
+        rect = geom.minimum_rotated_rectangle
+        if not isinstance(rect, Polygon):
+            return None
+        coords = np.array(rect.exterior.coords[:-1], dtype=float)
+        # edge lengths of the rect
+        e0 = np.linalg.norm(coords[1] - coords[0])
+        e1 = np.linalg.norm(coords[2] - coords[1])
+        if max(e0, e1) <= 0:
+            return None
+        if e0 >= e1:   # long axis along edge 0
+            long_vec, length, thickness = coords[1] - coords[0], e0, e1
+            a, b, c, d = coords[0], coords[1], coords[3], coords[2]
+        else:          # long axis along edge 1
+            long_vec, length, thickness = coords[2] - coords[1], e1, e0
+            a, b, c, d = coords[1], coords[2], coords[0], coords[3]
+        # centerline endpoints = midpoints of the two short edges
+        p1 = (a + c) / 2.0
+        p2 = (b + d) / 2.0
+        return p1, p2, float(length), float(thickness)
+
+    return None
+
+
+# def _draw_window_symbol(img: np.ndarray,
+#                         geom,
+#                         wall_color: int = 0,
+#                         bg_color: int = 255,
+#                         default_thickness: float = 6.0) -> np.ndarray:
+#     """
+#     Classic architectural window:
+#       erase opening → frame rectangle spanning EXACTLY p1→p2 across the full
+#       wall thickness (end caps sit at p1/p2 → flush with wall stubs)
+#       → one centre line along the opening.
+#     """
+#     result = _oriented_opening(geom, default_thickness)
+#     if result is None:
+#         return img
+#     p1, p2, length, wall_t = result
+#     if length < 2:
+#         return img
+
+#     u = (p2 - p1) / length
+#     perp = np.array([-u[1], u[0]])
+#     half_t = wall_t / 2.0
+
+#     def pt(p):
+#         return (int(round(p[0])), int(round(p[1])))
+
+#     # 1) erase opening across full wall thickness
+#     quad = np.array([pt(p1 + perp * half_t), pt(p1 - perp * half_t),
+#                      pt(p2 - perp * half_t), pt(p2 + perp * half_t)], np.int32)
+#     cv2.fillPoly(img, [quad], bg_color)
+
+#     # 2) frame rectangle, corners exactly at the opening ends → connected
+#     frame = np.array([pt(p1 + perp * half_t), pt(p2 + perp * half_t),
+#                       pt(p2 - perp * half_t), pt(p1 - perp * half_t)], np.int32)
+#     cv2.polylines(img, [frame], isClosed=True, color=wall_color, thickness=1)
+
+#     # 3) centre line along the opening
+#     cv2.line(img, pt(p1), pt(p2), wall_color, 1)
+#     return img
+
+
+def _draw_window_symbol(img, geom,
+                        wall_color=0,
+                        window_color=90,
+                        bg_color=255,
+                        default_thickness=6.0):
+    result = _oriented_opening(geom, default_thickness)
+    if result is None:
+        return img
+
+    p1, p2, length, wall_t = result
+    if length < 2:
+        return img
+
+    u = (p2 - p1) / length
+    perp = np.array([-u[1], u[0]])
+    half_t = wall_t / 2.0
+
+    def pt(p):
+        return (int(round(p[0])), int(round(p[1])))
+
+    # erase full opening
+    quad = np.array([
+        pt(p1 + perp * half_t),
+        pt(p1 - perp * half_t),
+        pt(p2 - perp * half_t),
+        pt(p2 + perp * half_t)
+    ], np.int32)
+    cv2.fillPoly(img, [quad], bg_color)
+
+    # draw softer, centered window lines
+    inset = 1.0
+    a1 = p1 + perp * (half_t - inset)
+    a2 = p2 + perp * (half_t - inset)
+    b1 = p1 - perp * (half_t - inset)
+    b2 = p2 - perp * (half_t - inset)
+
+    cv2.line(img, pt(a1), pt(a2), window_color, 1)
+    cv2.line(img, pt(b1), pt(b2), window_color, 1)
+    cv2.line(img, pt(p1), pt(p2), window_color, 1)
+
+    return img
+
+def _draw_door_symbol(img: np.ndarray,
+                      geom,
+                      wall_color: int = 0,
+                      bg_color: int = 255,
+                      swing_color: int = 120,
+                      default_thickness: float = 6.0) -> np.ndarray:
+    """
+    Architectural door symbol with automatic swing-side AND hinge-end choice:
+      1. BEFORE erasing, sample free space on both perpendicular sides → swing side.
+      2. BEFORE erasing, sample the quarter-disc the arc would occupy for BOTH
+         hinge ends → pick the hinge whose swing region is most free (prevents
+         collisions with walls and other doors).
+      3. Erase opening, draw a wall-colored hinge block (wall thickness),
+         thin leaf line, smooth quarter arc.
+    """
+    result = _oriented_opening(geom, default_thickness)
+    if result is None:
+        return img
+    p1, p2, length, wall_t = result
+    if length < 3:
+        return img
+
+    u = (p2 - p1) / length
+    perp = np.array([-u[1], u[0]])
+    half_t = wall_t / 2.0
+    h_img, w_img = img.shape[:2]
+
+    def pt(p):
+        return (int(round(p[0])), int(round(p[1])))
+
+    def sample_free(points):
+        free, tot = 0, 0
+        for sp in points:
+            ix, iy = int(round(sp[0])), int(round(sp[1]))
+            if 0 <= ix < w_img and 0 <= iy < h_img:
+                tot += 1
+                if img[iy, ix] == bg_color:
+                    free += 1
+        return free / max(tot, 1)
+
+    # ── 1) swing side (sampled BEFORE erase) ──
+    def side_points(sign):
+        pts = []
+        for t in np.linspace(0.1, 0.9, 7):
+            base = p1 + u * (length * t)
+            for d in np.linspace(half_t + 3, half_t + length, 6):
+                pts.append(base + sign * perp * d)
+        return pts
+
+    s = +1 if sample_free(side_points(+1)) >= sample_free(side_points(-1)) else -1
+
+    # ── 2) hinge end: test the quarter-disc swept by the arc for both ends ──
+    def quarter_free(hinge, other):
+        d_open = (other - hinge) / length
+        pts = []
+        for rr in np.linspace(length * 0.3, length * 0.95, 5):
+            for aa in np.linspace(0.08, math.pi / 2 - 0.08, 7):
+                dirv = d_open * math.cos(aa) + s * perp * math.sin(aa)
+                pts.append(hinge + dirv * rr)
+        return sample_free(pts)
+
+    if quarter_free(p1, p2) >= quarter_free(p2, p1):
+        hinge, other = p1, p2
+    else:
+        hinge, other = p2, p1
+
+    # ── 3) erase opening ──
+    quad = np.array([pt(p1 + perp * half_t), pt(p1 - perp * half_t),
+                     pt(p2 - perp * half_t), pt(p2 + perp * half_t)], np.int32)
+    cv2.fillPoly(img, [quad], bg_color)
+
+    # ── 4) hinge block: wall-colored, full wall thickness, flush with stub ──
+    hs = max(2, int(round(wall_t / 2)))
+    d_open = (other - hinge) / length
+    hq = np.array([pt(hinge + perp * half_t),
+                   pt(hinge + d_open * hs + perp * half_t),
+                   pt(hinge + d_open * hs - perp * half_t),
+                   pt(hinge - perp * half_t)], np.int32)
+    cv2.fillPoly(img, [hq], wall_color)
+
+    # ── 5) leaf + smooth arc (pivot at inner face of hinge block) ──
+    leaf = length - hs
+    leaf_base = hinge + d_open * hs
+    open_tip = leaf_base + s * perp * leaf
+    closed_tip = other
+
+    cv2.line(img, pt(leaf_base), pt(open_tip), swing_color, 1)
+
+    a0 = math.atan2(closed_tip[1] - leaf_base[1], closed_tip[0] - leaf_base[0])
+    a1 = math.atan2(open_tip[1] - leaf_base[1], open_tip[0] - leaf_base[0])
+    delta = a1 - a0
+    while delta > math.pi:
+        delta -= 2 * math.pi
+    while delta < -math.pi:
+        delta += 2 * math.pi
+
+    steps = max(40, int(leaf * 2))
+    arc = np.array([pt(leaf_base + leaf * np.array([math.cos(a0 + delta * t / steps),
+                                                    math.sin(a0 + delta * t / steps)]))
+                    for t in range(steps + 1)], np.int32)
+    cv2.polylines(img, [arc], isClosed=False, color=swing_color, thickness=1)
+    return img
+
 
 def get_2d_plan(plan: Dict[str, Any],
                 shape: Tuple[int, int] = DEFAULT_CANVAS_SIZE,
@@ -444,40 +665,63 @@ def get_2d_plan(plan: Dict[str, Any],
                 ax: Optional[plt.Axes] = None,
                 show: bool = True,
                 title: Optional[str] = None,
-                diff: bool=True,
+                diff: bool = True,
                 draw_door_swing: bool = True) -> np.ndarray:
 
     plan = normalize_keys(plan)
-    h, w = shape
-    img = np.full((h, w), bg_color, dtype=np.uint8)
 
-    # 1) Walls first
+    wall_width = float(plan.get("wall_width", 6) or 6)
+    pad = int(round(wall_width)) + 4
+
+    h, w = shape
+    padded_shape = (h + 2 * pad, w + 2 * pad)
+
+    plan = dict(plan)
+    for key in ["wall", "door", "window", "front_door"]:
+        if plan.get(key) is not None:
+            plan[key] = affinity.translate(plan[key], xoff=pad, yoff=pad)
+
+    img = np.full(padded_shape, bg_color, dtype=np.uint8)
+
+    # 1) walls
     wall_geom = plan.get("wall")
     if wall_geom is not None:
-        mask = geometry_to_mask(wall_geom, shape=shape, line_thickness=line_thickness)
+        mask = geometry_to_mask(wall_geom, shape=padded_shape,
+                                line_thickness=line_thickness)
         img[mask > 0] = wall_color
 
-    # 2) Draw windows and front door normally
+    # 2) windows + front door (window-style symbol)
     for key in ["window", "front_door"]:
         geom = plan.get(key)
         if geom is None:
             continue
-        mask = geometry_to_mask(geom, shape=shape, line_thickness=line_thickness)
-        img[mask > 0] = opening_color if diff else wall_color
+        for g in get_geometries(geom):
+            # img = _draw_window_symbol(img, g,
+            #                           wall_color=wall_color,
+            #                           bg_color=bg_color,
+            #                           default_thickness=wall_width)
+            img = _draw_window_symbol(
+                    img, g,
+                    wall_color=wall_color,
+                    window_color=90,
+                    bg_color=bg_color,
+                    default_thickness=wall_width
+                )
 
-    # 3) Draw doors
+    # 3) interior doors — swing-side and hinge-end auto-detected BEFORE erase,
+    #    so draw them one at a time on the live image
     door_geom = plan.get("door")
     if door_geom is not None:
         if draw_door_swing:
-            img = draw_door_swing_on_image(
-                img,
-                door_geom,
-                shape=shape,
-                color=opening_color if diff else wall_color,
-                thickness=1,
-            )
+            for g in get_geometries(door_geom):
+                img = _draw_door_symbol(img, g,
+                                        wall_color=wall_color,
+                                        bg_color=bg_color,
+                                        swing_color=opening_color,
+                                        default_thickness=wall_width)
         else:
-            mask = geometry_to_mask(door_geom, shape=shape, line_thickness=line_thickness)
+            mask = geometry_to_mask(door_geom, shape=padded_shape,
+                                    line_thickness=line_thickness)
             img[mask > 0] = opening_color if diff else wall_color
 
     img = np.flipud(img)
@@ -492,125 +736,4 @@ def get_2d_plan(plan: Dict[str, Any],
         plt.tight_layout()
 
     return img
-
-
-def _door_opening_line_from_geom(door):
-    """
-    Returns door opening line endpoints from LineString or Polygon.
-    For Polygon door rectangles, uses the long axis centerline.
-    """
-    if isinstance(door, LineString):
-        coords = list(door.coords)
-        if len(coords) >= 2:
-            return coords[0], coords[-1]
-
-    if isinstance(door, Polygon):
-        rect = door.minimum_rotated_rectangle
-        coords = np.array(rect.exterior.coords[:-1], dtype=float)
-
-        # find main direction from longest rectangle edge
-        best_len = -1
-        best_vec = None
-
-        for i in range(4):
-            p1 = coords[i]
-            p2 = coords[(i + 1) % 4]
-            vec = p2 - p1
-            length = np.linalg.norm(vec)
-
-            if length > best_len:
-                best_len = length
-                best_vec = vec
-
-        if best_vec is None or best_len <= 0:
-            return None, None
-
-        u = best_vec / best_len
-
-        # project all rectangle points onto long axis
-        projections = coords @ u
-        min_proj = projections.min()
-        max_proj = projections.max()
-
-        center = coords.mean(axis=0)
-
-        p1 = center + u * (min_proj - center @ u)
-        p2 = center + u * (max_proj - center @ u)
-
-        return tuple(p1), tuple(p2)
-
-    return None, None
-
-def draw_door_swing_on_image(
-    img: np.ndarray,
-    door_geom: Any,
-    shape: Tuple[int, int] = DEFAULT_CANVAS_SIZE,
-    color: int = 140,
-    thickness: int = 2,
-) -> np.ndarray:
-
-    h, w = shape
-
-    for door in get_geometries(door_geom):
-        p1, p2 = _door_opening_line_from_geom(door)
-
-        if p1 is None or p2 is None:
-            continue
-
-        x1, y1 = p1
-        x2, y2 = p2
-
-        dx = x2 - x1
-        dy = y2 - y1
-        radius = int(round(math.hypot(dx, dy)))
-
-        if radius <= 2:
-            continue
-
-        # unit vector along door opening
-        ux = dx / radius
-        uy = dy / radius
-
-        # choose hinge as first endpoint
-        hinge = (int(round(x1)), int(round(y1)))
-
-        # perpendicular direction for opened door leaf
-        # change sign here if swing side is wrong
-        px = -uy
-        py = ux
-
-        open_end = (
-            int(round(x1 + px * radius)),
-            int(round(y1 + py * radius)),
-        )
-
-        closed_end = (
-            int(round(x2)),
-            int(round(y2)),
-        )
-
-        # draw opened door leaf
-        cv2.line(img, hinge, open_end, color=color, thickness=thickness)
-
-        # angle from hinge to closed end
-        start_angle = math.degrees(math.atan2(dy, dx))
-
-        # angle from hinge to open end
-        end_angle = math.degrees(math.atan2(py, px))
-
-        cv2.ellipse(
-            img,
-            hinge,
-            (radius, radius),
-            0,
-            int(round(start_angle)),
-            int(round(end_angle)),
-            color,
-            thickness,
-        )
-
-    return img
-
-
-
 
